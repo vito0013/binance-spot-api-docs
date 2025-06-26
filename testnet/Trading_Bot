@@ -1,0 +1,147 @@
+import pandas as pd
+import ta
+import time
+from datetime import datetime
+from binance.client import Client
+from binance.enums import *
+
+# 🔐 API-Konfiguration (DEINE SCHLÜSSEL HIER EINFÜGEN)
+API_KEY = "dzs3xdsuR9AHEdWrKTk02Z7wcWr7aAo7xLoezL8xC3C0aNNbdemyCIRpCdU5YI1A"
+API_SECRET = "bw1oJn31nLhtXs7APCEwygv6oQ4ZwNIObUGXEYoH2mSHzPYWEcFgTDfNgJ71A26n"
+
+# ⚙️ Handelskonfiguration
+SYMBOL = "BTCUSDT"
+TRADE_AMOUNT = 0.001  # BTC-Menge pro Trade
+INTERVAL = KLINE_INTERVAL_1MINUTE
+STOP_LOSS_PCT = 2.0  # 2% Stop-Loss
+TAKE_PROFIT_PCT = 5.0  # 5% Take-Profit
+
+class TradingBot:
+    def __init__(self):
+        self.client = Client(API_KEY, API_SECRET, testnet=True)
+        self.position = None
+        self.entry_price = None
+        self.trade_history = []
+        
+    def get_market_data(self):
+        """Hole aktuelle Marktdaten"""
+        klines = self.client.get_klines(
+            symbol=SYMBOL,
+            interval=INTERVAL,
+            limit=100
+        )
+        df = pd.DataFrame(klines, columns=[
+            'time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'trades',
+            'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+        df['close'] = df['close'].astype(float)
+        return df
+
+    def calculate_indicators(self, df):
+        """Berechne technische Indikatoren"""
+        # EMA
+        df['ema_9'] = ta.trend.ema_indicator(df['close'], window=9)
+        df['ema_21'] = ta.trend.ema_indicator(df['close'], window=21)
+        
+        # MACD
+        macd = ta.trend.MACD(df['close'])
+        df['macd'] = macd.macd()
+        df['macd_signal'] = macd.macd_signal()
+        
+        # RSI
+        df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+        
+        return df
+
+    def check_conditions(self, df):
+        """Prüfe Trading-Bedingungen"""
+        last_candle = df.iloc[-1]
+        
+        # Kaufbedingungen (Long)
+        buy_condition = (
+            last_candle['rsi'] < 30 and
+            last_candle['macd'] > last_candle['macd_signal'] and
+            last_candle['close'] > last_candle['ema_9']
+        )
+        
+        # Verkaufsbedingungen
+        sell_condition = (
+            last_candle['rsi'] > 70 or
+            self.position == "LONG" and (
+                last_candle['close'] <= self.entry_price * (1 - STOP_LOSS_PCT/100) or
+                last_candle['close'] >= self.entry_price * (1 + TAKE_PROFIT_PCT/100)
+        )
+        
+        return "BUY" if buy_condition else "SELL" if sell_condition else "HOLD"
+
+    def execute_trade(self, action, price):
+        """Führe Trade aus"""
+        try:
+            if action == "BUY" and not self.position:
+                order = self.client.create_order(
+                    symbol=SYMBOL,
+                    side=SIDE_BUY,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=TRADE_AMOUNT
+                )
+                self.position = "LONG"
+                self.entry_price = float(order['fills'][0]['price'])
+                self.log_trade("BUY", order)
+                
+            elif action == "SELL" and self.position == "LONG":
+                order = self.client.create_order(
+                    symbol=SYMBOL,
+                    side=SIDE_SELL,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=TRADE_AMOUNT
+                )
+                self.log_trade("SELL", order)
+                self.position = None
+                
+        except Exception as e:
+            print(f"⚠️ Trade-Fehler: {str(e)}")
+
+    def log_trade(self, action, order):
+        """Protokolliere Trade-Details"""
+        trade = {
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'action': action,
+            'price': float(order['fills'][0]['price']),
+            'amount': TRADE_AMOUNT,
+            'value': TRADE_AMOUNT * float(order['fills'][0]['price'])
+        }
+        self.trade_history.append(trade)
+        print(f"✅ {trade['time']} | {action} {TRADE_AMOUNT} {SYMBOL} @ {trade['price']:.2f}")
+
+    def run(self):
+        """Haupt-Loop"""
+        print(f"🚀 Starte Trading-Bot für {SYMBOL} (Testnet)")
+        print(f"Handelsvolumen: {TRADE_AMOUNT} {SYMBOL.replace('USDT', '')}")
+        
+        try:
+            while True:
+                df = self.get_market_data()
+                df = self.calculate_indicators(df)
+                action = self.check_conditions(df)
+                
+                if action in ["BUY", "SELL"]:
+                    current_price = df.iloc[-1]['close']
+                    self.execute_trade(action, current_price)
+                
+                # Kontostand anzeigen
+                balance = self.client.get_asset_balance(asset='USDT')
+                print(f"💰 Guthaben: {float(balance['free']):.2f} USDT | Position: {self.position or 'Keine'}")
+                
+                time.sleep(10)  # Alle 10 Sekunden prüfen
+                
+        except KeyboardInterrupt:
+            print("\n🔴 Bot gestoppt")
+            if self.trade_history:
+                print("\n📊 Trade-Historie:")
+                for trade in self.trade_history:
+                    print(f"{trade['time']} | {trade['action']} | Preis: {trade['price']:.2f} | Wert: {trade['value']:.2f} USDT")
+
+if __name__ == "__main__":
+    bot = TradingBot()
+    bot.run()
